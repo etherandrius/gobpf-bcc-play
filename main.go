@@ -13,40 +13,62 @@ import (
 
 const source string = `
 #include <uapi/linux/ptrace.h>
-
-struct readline_event_t {
-		u32 pid;
-		u64 cgid;
-        char str[80];
-} __attribute__((packed));
-
-BPF_PERF_OUTPUT(readline_events);
-
-int get_return_value(struct pt_regs *ctx) {
-	struct readline_event_t event = {};
+#include <linux/sched.h>
+struct val_t {
     u32 pid;
-    u64 cgid;
+    char comm[TASK_COMM_LEN];
+    char host[80];
+    u64 ts;
+};
 
-    if (!PT_REGS_RC(ctx))
+struct data_t {
+    u32 pid;
+    u64 delta;
+    char comm[TASK_COMM_LEN];
+    char host[80];
+};
+
+BPF_HASH(start, u32, struct val_t);
+BPF_PERF_OUTPUT(events);
+int do_entry(struct pt_regs *ctx) {
+    if (!PT_REGS_PARM1(ctx))
         return 0;
+    struct val_t val = {};
+    u32 pid = bpf_get_current_pid_tgid();
+    if (bpf_get_current_comm(&val.comm, sizeof(val.comm)) == 0) {
+        bpf_probe_read_user(&val.host, sizeof(val.host),
+                       (void *)PT_REGS_PARM1(ctx));
+        val.pid = bpf_get_current_pid_tgid();
+        val.ts = bpf_ktime_get_ns();
+        start.update(&pid, &val);
+    }
+    return 0;
+}
 
-    pid = bpf_get_current_pid_tgid();
-	event.pid = pid;
-
-	cgid = bpf_get_current_cgroup_id();
-	event.cgid = cgid;
-
-    bpf_probe_read(&event.str, sizeof(event.str), (void *)PT_REGS_RC(ctx));
-    readline_events.perf_submit(ctx, &event, sizeof(event));
-
+int do_return(struct pt_regs *ctx) {
+    struct val_t *valp;
+    struct data_t data = {};
+    u64 delta;
+    u32 pid = bpf_get_current_pid_tgid();
+    u64 tsp = bpf_ktime_get_ns();
+    valp = start.lookup(&pid);
+    if (valp == 0)
+        return 0;       // missed start
+    bpf_probe_read_kernel(&data.comm, sizeof(data.comm), valp->comm);
+    bpf_probe_read_kernel(&data.host, sizeof(data.host), (void *)valp->host);
+    data.pid = valp->pid;
+    data.delta = tsp - valp->ts;
+    events.perf_submit(ctx, &data, sizeof(data));
+    start.delete(&pid);
     return 0;
 }
 `
 
-type readlineEvent struct {
-	Pid  uint32
-	CgID uint64
-	Str  [80]byte
+type dnsEvent struct {
+	Pid   uint32
+	Delta uint64
+	Comm  [80]byte
+	Host  [80]byte
 }
 
 func main() {
@@ -55,16 +77,37 @@ func main() {
 		_ = m.Close
 	}()
 
-	readlineUretprobe, err := m.LoadUprobe("get_return_value")
+	doEntry, err := m.LoadUprobe("do_entry")
 	if err != nil {
 		panic(err)
 	}
 
-	if err := m.AttachUretprobe("/bin/bash", "readline", readlineUretprobe, -1); err != nil {
+	doReturn, err := m.LoadUprobe("do_return")
+	if err != nil {
 		panic(err)
 	}
 
-	table := bpf.NewTable(m.TableId("readline_events"), m)
+	if err := m.AttachUprobe("c", "getaddrinfo", doEntry, -1); err != nil {
+		panic(err)
+	}
+	if err := m.AttachUprobe("c", "gethostbyname", doEntry, -1); err != nil {
+		panic(err)
+	}
+	if err := m.AttachUprobe("c", "gethostbyname2", doEntry, -1); err != nil {
+		panic(err)
+	}
+
+	if err := m.AttachUretprobe("c", "getaddrinfo", doReturn, -1); err != nil {
+		panic(err)
+	}
+	if err := m.AttachUretprobe("c", "gethostbyname", doReturn, -1); err != nil {
+		panic(err)
+	}
+	if err := m.AttachUretprobe("c", "gethostbyname2", doReturn, -1); err != nil {
+		panic(err)
+	}
+
+	table := bpf.NewTable(m.TableId("events"), m)
 	channel := make(chan []byte)
 	perfMap, err := bpf.InitPerfMap(table, channel, nil)
 	if err != nil {
@@ -75,15 +118,16 @@ func main() {
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
-		var event readlineEvent
+		var event dnsEvent
 		for {
 			data := <-channel
 			if err := binary.Read(bytes.NewBuffer(data), binary.LittleEndian, &event); err != nil {
 				fmt.Println(err)
 				continue
 			}
-			comm := string(event.Str[:bytes.IndexByte(event.Str[:], 0)])
-			fmt.Printf("pid:%v, cgid:%v, command:%s\n", event.Pid, event.CgID, string(comm))
+			comm := string(event.Comm[:bytes.IndexByte(event.Comm[:], 0)])
+			host := string(event.Host[:bytes.IndexByte(event.Host[:], 0)])
+			fmt.Printf("pid:%v, command:%s, LATms:%v, Host:%s\n", event.Pid, string(comm), event.Delta, string(host))
 		}
 	}()
 
