@@ -1,8 +1,6 @@
 package main
 
-import "C"
 import (
-	"unsafe"
 	"bytes"
 	"encoding/binary"
 	"fmt"
@@ -21,14 +19,14 @@ struct val_t {
     char comm[TASK_COMM_LEN];
     char host[80];
     u64 ts;
-};
+} __attribute__((packed));
 
 struct data_t {
     u32 pid;
     u64 delta;
     char comm[TASK_COMM_LEN];
     char host[80];
-};
+} __attribute__((packed));
 
 BPF_HASH(start, u32, struct val_t);
 BPF_PERF_OUTPUT(events);
@@ -128,11 +126,9 @@ func main() {
 				continue
 			}
 
-			host := (*C.char)(unsafe.Pointer(&event.Host))
-			
-			a := C.GoString(host)
-
-			fmt.Printf("pid:%v, command:%s, LATms:%10.2f, Host:%s\n", event.Pid, string(event.Comm[:]), float64(event.Delta) / 1000000, a)
+			host := string(event.Host[:bytes.IndexByte(event.Host[:], 0)])
+			comm := string(event.Comm[:bytes.IndexByte(event.Comm[:], 0)])
+			fmt.Printf("pid:%v, command:%s, LATms:%10.2f, Host:%s\n", event.Pid, comm, (float64(event.Delta) / 1000000), host)
 		}
 	}()
 
