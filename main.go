@@ -1,6 +1,8 @@
 package main
 
+import "C"
 import (
+	"unsafe"
 	"bytes"
 	"encoding/binary"
 	"fmt"
@@ -125,7 +127,12 @@ func main() {
 				fmt.Println(err)
 				continue
 			}
-			fmt.Printf("pid:%v, command:%s, LATms:%v, Host:%s\n", event.Pid, string(event.Comm[:]), float64(event.Delta) / 1000000, string(event.Host[:]))
+
+			host := (*C.char)(unsafe.Pointer(&event.Host))
+			
+			a := C.GoString(host)
+
+			fmt.Printf("pid:%v, command:%s, LATms:%10.2f, Host:%s\n", event.Pid, string(event.Comm[:]), float64(event.Delta) / 1000000, a)
 		}
 	}()
 
