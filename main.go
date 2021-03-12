@@ -67,7 +67,7 @@ int do_return(struct pt_regs *ctx) {
 type dnsEvent struct {
 	Pid   uint32
 	Delta uint64
-	Comm  [80]byte
+	Comm  [16]byte
 	Host  [80]byte
 }
 
@@ -125,9 +125,7 @@ func main() {
 				fmt.Println(err)
 				continue
 			}
-			comm := string(event.Comm[:bytes.IndexByte(event.Comm[:], 0)])
-			host := string(event.Host[:bytes.IndexByte(event.Host[:], 0)])
-			fmt.Printf("pid:%v, command:%s, LATms:%v, Host:%s\n", event.Pid, string(comm), event.Delta, string(host))
+			fmt.Printf("pid:%v, command:%s, LATms:%v, Host:%s\n", event.Pid, string(event.Comm[:]), float64(event.Delta) / 1000000, string(event.Host[:]))
 		}
 	}()
 
